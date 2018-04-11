@@ -345,7 +345,11 @@ int adore_opt_filldir(void *buf, const char *name, int nlen, loff_t off, u64 ino
 		return 0;
 	this.name = name;
 	this.len = nlen;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
 	this.hash = full_name_hash(this.name, this.len);
+#else
+	this.hash = full_name_hash(dir, this.name, this.len);
+#endif
 	dentry  = d_lookup(dir, &this);
 	if (!dentry) {
 		dentry = d_alloc(dir, &this);
@@ -440,7 +444,11 @@ int adore_root_filldir(void *buf, const char *name, int nlen, loff_t off, u64 in
 	 */
 	this.name = name;
 	this.len = nlen;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
 	this.hash = full_name_hash(this.name, this.len);
+#else
+	this.hash = full_name_hash(dir, this.name, this.len);
+#endif
 	dentry  = d_lookup(dir, &this);
 	if (!dentry) {
 		dentry = d_alloc(dir, &this);
@@ -562,16 +570,21 @@ int patch_vfs(const char *p,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	if (orig_readdir)
 		*orig_readdir = filep->f_op->readdir;
-#else
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
 	if (orig_iterate)
 		*orig_iterate = filep->f_op->iterate;
+#else
+	if (orig_iterate)
+		*orig_iterate = filep->f_op->iterate_shared;
 #endif
 
 	new_op = (struct file_operations *)filep->f_op;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	new_op->readdir = new_readdir;
-#else
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
 	new_op->iterate = new_iterate;
+#else
+	new_op->iterate_shared = new_iterate;
 	printk(LOG_ADORE"patch vfs     : %p --> %p\n", *orig_iterate, new_iterate);
 #endif
 
@@ -599,9 +612,12 @@ int unpatch_vfs(const char *p,
 	new_op = (struct file_operations *)filep->f_op;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	new_op->readdir = orig_readdir;
-#else
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
 	printk(LOG_ADORE"unpatch vfs     : %p --> %p\n", new_op->iterate, orig_iterate);
 	new_op->iterate = orig_iterate;
+#else
+	printk(LOG_ADORE"unpatch vfs     : %p --> %p\n", new_op->iterate_shared, orig_iterate);
+	new_op->iterate_shared = orig_iterate;
 #endif
 
 	filp_close(filep, 0);

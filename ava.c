@@ -79,9 +79,9 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 	if (version < CURRENT_ADORE) 
-		printf("Found adore 1.%d installed. Please update adore.", version);
+		printf("Found adore 2.%d installed. Please update adore.", version);
 	else
-		printf("Adore 1.%d installed. Good luck.\n", version);
+		printf("Adore 2.%d installed. Good luck.\n", version);
     
         switch (what) {
         
